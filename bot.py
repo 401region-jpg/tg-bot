@@ -32,6 +32,7 @@ async def init_db():
     await db.execute("""
     CREATE TABLE IF NOT EXISTS users(
         user_id INTEGER PRIMARY KEY,
+        username TEXT,
         name TEXT,
         age INTEGER,
         bio TEXT,
@@ -49,6 +50,7 @@ async def init_db():
     """)
     await db.commit()
 
+# --- регистрация
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     async with db.execute("SELECT step FROM users WHERE user_id = ?", (message.from_user.id,)) as cur:
@@ -56,7 +58,10 @@ async def cmd_start(message: types.Message):
     if row:
         await message.answer("Вы уже зарегистрированы.", reply_markup=main_kb)
         return
-    await db.execute("INSERT OR REPLACE INTO users(user_id, step) VALUES(?, ?)", (message.from_user.id, "name"))
+    await db.execute(
+        "INSERT OR REPLACE INTO users(user_id, username, step) VALUES(?, ?, ?)",
+        (message.from_user.id, message.from_user.username, "name")
+    )
     await db.commit()
     await message.answer("Привет! Введи своё имя:")
 
@@ -69,7 +74,7 @@ async def handler(message: types.Message):
         return
     step = row[0]
 
-    # регистрация
+    # шаги регистрации
     if step == "name":
         await db.execute("UPDATE users SET name = ?, step = ? WHERE user_id = ?", (message.text, "age", message.from_user.id))
         await db.commit()
@@ -117,7 +122,7 @@ async def handler(message: types.Message):
 
     if message.text == "Смотреть анкеты":
         async with db.execute("""
-            SELECT user_id, name, age, bio, photo_id
+            SELECT user_id, name, age, bio, photo_id, username
             FROM users
             WHERE step = 'done' AND user_id != ?
             ORDER BY RANDOM() LIMIT 1
@@ -126,20 +131,23 @@ async def handler(message: types.Message):
         if not row:
             await message.answer("Анкет других пользователей пока нет.")
             return
-        uid, name, age, bio, photo_id = row
+        uid, name, age, bio, photo_id, username = row
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="❤️ Нравится", callback_data=f"like:{uid}")],
             [InlineKeyboardButton(text="➡️ Пропустить", callback_data=f"skip:{uid}")]
         ])
+        text = f"Имя: {name}\nВозраст: {age}\nО себе: {bio}"
+        if username:
+            text += f"\n@{username}"
         if photo_id:
-            await message.answer_photo(photo_id, caption=f"Имя: {name}\nВозраст: {age}\nО себе: {bio}", reply_markup=kb)
+            await message.answer_photo(photo_id, caption=text, reply_markup=kb)
         else:
-            await message.answer(f"Имя: {name}\nВозраст: {age}\nО себе: {bio}", reply_markup=kb)
+            await message.answer(text, reply_markup=kb)
         return
 
     if message.text == "Кто меня оценил":
         async with db.execute("""
-            SELECT u.user_id, u.name, u.age, u.bio, u.photo_id
+            SELECT u.user_id, u.name, u.age, u.bio, u.photo_id, u.username
             FROM likes l
             JOIN users u ON l.liker = u.user_id
             WHERE l.liked = ? AND l.seen = 0
@@ -148,22 +156,25 @@ async def handler(message: types.Message):
         if not rows:
             await message.answer("Новых оценок нет.")
             return
-        for uid, name, age, bio, photo_id in rows:
+        for uid, name, age, bio, photo_id, username in rows:
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="❤️ Взаимно", callback_data=f"like:{uid}")],
                 [InlineKeyboardButton(text="➡️ Пропустить", callback_data=f"skip:{uid}")]
             ])
+            text = f"Имя: {name}\nВозраст: {age}\nО себе: {bio}"
+            if username:
+                text += f"\n@{username}"
             if photo_id:
-                await message.answer_photo(photo_id, caption=f"Имя: {name}\nВозраст: {age}\nО себе: {bio}", reply_markup=kb)
+                await message.answer_photo(photo_id, caption=text, reply_markup=kb)
             else:
-                await message.answer(f"Имя: {name}\nВозраст: {age}\nО себе: {bio}", reply_markup=kb)
+                await message.answer(text, reply_markup=kb)
         await db.execute("UPDATE likes SET seen = 1 WHERE liked = ?", (message.from_user.id,))
         await db.commit()
         return
 
     if message.text == "Мои мэтчи":
         async with db.execute("""
-            SELECT u.user_id, u.name, u.age, u.bio, u.photo_id
+            SELECT u.user_id, u.name, u.age, u.bio, u.photo_id, u.username
             FROM likes l1
             JOIN likes l2 ON l1.liker = l2.liked AND l1.liked = l2.liker
             JOIN users u ON u.user_id = l1.liked
@@ -173,13 +184,17 @@ async def handler(message: types.Message):
         if not rows:
             await message.answer("У вас пока нет мэтчей.")
             return
-        for uid, name, age, bio, photo_id in rows:
+        for uid, name, age, bio, photo_id, username in rows:
+            text = f"Имя: {name}\nВозраст: {age}\nО себе: {bio}"
+            if username:
+                text += f"\n@{username}"
             if photo_id:
-                await message.answer_photo(photo_id, caption=f"Имя: {name}\nВозраст: {age}\nО себе: {bio}")
+                await message.answer_photo(photo_id, caption=text)
             else:
-                await message.answer(f"Имя: {name}\nВозраст: {age}\nО себе: {bio}")
+                await message.answer(text)
         return
 
+# --- лайки и пропуск
 @dp.callback_query()
 async def callbacks(call: types.CallbackQuery):
     data = call.data or ""
@@ -187,24 +202,28 @@ async def callbacks(call: types.CallbackQuery):
         liked_id = int(data.split(":", 1)[1])
         await db.execute("INSERT OR IGNORE INTO likes(liker, liked) VALUES(?, ?)", (call.from_user.id, liked_id))
         await db.commit()
-        # проверка взаимности
         async with db.execute("SELECT 1 FROM likes WHERE liker = ? AND liked = ?", (liked_id, call.from_user.id)) as cur:
             rev = await cur.fetchone()
         if rev:
             await call.answer("Это матч! 🎉")
             try:
-                await bot.send_message(liked_id, f"У вас мэтч с {call.from_user.first_name} ❤️")
+                await bot.send_message(liked_id, f"У вас мэтч с {call.from_user.first_name} (@{call.from_user.username}) ❤️")
             except Exception:
                 pass
         else:
             await call.answer("Симпатия сохранена.")
-            try:
-                await bot.send_message(liked_id, "Вас кто-то оценил ❤️")
-            except Exception:
-                pass
     elif data.startswith("skip:"):
         await call.answer("Пропущено.")
 
+# --- удаление анкеты при блокировке или очистке чата
+@dp.my_chat_member()
+async def handle_block(event: types.ChatMemberUpdated):
+    if event.new_chat_member.status in ["kicked", "left"]:
+        await db.execute("DELETE FROM users WHERE user_id = ?", (event.from_user.id,))
+        await db.execute("DELETE FROM likes WHERE liker = ? OR liked = ?", (event.from_user.id, event.from_user.id))
+        await db.commit()
+
+# --- запуск
 async def main():
     await init_db()
     try:
