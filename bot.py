@@ -14,11 +14,11 @@ from aiogram.dispatcher.filters import Text
 # -----------------------------------
 TOKEN = "7517420285:AAEJMY567Htns_i3SbMqww5U0O_-TTjbPW8"
 ADMIN_USERNAME = "@lxsonen"
-ADMIN_ID = None  # Определим позже по username
+ADMIN_ID = None
 DB_FILE = "database.db"
 BACKUP_FILE = "database_backup.db"
 MIN_AGE, MAX_AGE = 16, 30
-SUPERLIKE_COOLDOWN = 24 * 3600  # 1 раз в сутки
+SUPERLIKE_COOLDOWN = 24 * 3600
 
 # -----------------------------------
 # Логирование
@@ -86,7 +86,7 @@ def update_activity(user_id):
 
 async def log_errors():
     while True:
-        await asyncio.sleep(86400)  # раз в день
+        await asyncio.sleep(86400)
         try:
             await bot.send_message(ADMIN_ID, "ℹ️ Ежедневный отчёт: бот работает стабильно ✅")
         except Exception as e:
@@ -96,6 +96,20 @@ def cleanup_inactive():
     cutoff = datetime.datetime.now() - datetime.timedelta(days=30)
     cursor.execute("DELETE FROM users WHERE last_active < ?", (cutoff,))
     conn.commit()
+
+async def show_random_profile(chat_id, viewer_id):
+    cursor.execute("SELECT * FROM users WHERE user_id != ? AND name IS NOT NULL AND age IS NOT NULL AND photo IS NOT NULL", (viewer_id,))
+    rows = cursor.fetchall()
+    if not rows:
+        await bot.send_message(chat_id, "Нет анкет для просмотра.")
+        return
+
+    row = random.choice(rows)
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("👍 Лайк", callback_data=f"like_{row[0]}"))
+    kb.add(InlineKeyboardButton("👎 Пропустить", callback_data=f"skip_{row[0]}"))
+    kb.add(InlineKeyboardButton("⭐ Суперлайк", callback_data=f"superlike_{row[0]}"))
+    await bot.send_photo(chat_id, row[5], caption=f"{row[2]}, {row[3]}\n\n{row[4]}", reply_markup=kb)
 
 # -----------------------------------
 # Хендлеры
@@ -109,19 +123,24 @@ async def start_cmd(msg: types.Message):
     cursor.execute("INSERT OR IGNORE INTO users (user_id, username, last_active) VALUES (?, ?, ?)",
                    (msg.from_user.id, msg.from_user.username, datetime.datetime.now()))
     conn.commit()
-    await msg.answer("👋 Добро пожаловать в бота знакомств! Заполни анкету:", reply_markup=main_kb)
+
+    user = get_user(msg.from_user.id)
+    if user and user[2] and user[3] and user[5]:  # name, age, photo
+        await msg.answer("👋 С возвращением! Вы уже заполнили анкету.", reply_markup=main_kb)
+    else:
+        await msg.answer("👋 Добро пожаловать! Заполни анкету:", reply_markup=main_kb)
 
 @dp.message_handler(Text(equals="👤 Заполнить анкету заново"))
 async def fill_profile(msg: types.Message):
     await msg.answer("Введите имя:")
-    dp.register_message_handler(process_name, state="fill_name")
+    dp.register_message_handler(process_name, state="*")
 
 async def process_name(msg: types.Message):
     name = msg.text
     cursor.execute("UPDATE users SET name=? WHERE user_id=?", (name, msg.from_user.id))
     conn.commit()
     await msg.answer("Введите возраст:")
-    dp.register_message_handler(process_age, state="fill_age")
+    dp.register_message_handler(process_age, state="*")
 
 async def process_age(msg: types.Message):
     try:
@@ -136,14 +155,14 @@ async def process_age(msg: types.Message):
     cursor.execute("UPDATE users SET age=? WHERE user_id=?", (age, msg.from_user.id))
     conn.commit()
     await msg.answer("Введите описание (до 1240 символов):")
-    dp.register_message_handler(process_desc, state="fill_desc")
+    dp.register_message_handler(process_desc, state="*")
 
 async def process_desc(msg: types.Message):
     text = msg.text[:1240]
     cursor.execute("UPDATE users SET description=? WHERE user_id=?", (text, msg.from_user.id))
     conn.commit()
     await msg.answer("Отправьте фото:")
-    dp.register_message_handler(process_photo, content_types=["photo"], state="fill_photo")
+    dp.register_message_handler(process_photo, content_types=["photo"], state="*")
 
 async def process_photo(msg: types.Message):
     file_id = msg.photo[-1].file_id
@@ -154,26 +173,17 @@ async def process_photo(msg: types.Message):
 @dp.message_handler(Text(equals="🔍 Смотреть анкеты"))
 async def view_profiles(msg: types.Message):
     user = get_user(msg.from_user.id)
-    if not user or not user[2] or not user[3]:
+    if not user or not user[2] or not user[3] or not user[5]:
         await msg.answer("Сначала заполни анкету.")
         return
-    cursor.execute("SELECT * FROM users WHERE user_id != ?", (msg.from_user.id,))
-    rows = cursor.fetchall()
-    if not rows:
-        await msg.answer("Нет анкет.")
-        return
-    row = random.choice(rows)
-    kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("👍 Лайк", callback_data=f"like_{row[0]}"))
-    kb.add(InlineKeyboardButton("👎 Пропустить", callback_data=f"skip_{row[0]}"))
-    kb.add(InlineKeyboardButton("⭐ Суперлайк", callback_data=f"superlike_{row[0]}"))
-    await bot.send_photo(msg.chat.id, row[5], caption=f"{row[2]}, {row[3]}\n\n{row[4]}", reply_markup=kb)
+    await show_random_profile(msg.chat.id, msg.from_user.id)
 
-@dp.callback_query_handler(lambda c: c.data.startswith("like_") or c.data.startswith("superlike_") or c.data.startswith("skip_"))
+@dp.callback_query_handler(lambda c: c.data.startswith(("like_", "superlike_", "skip_")))
 async def process_like(call: types.CallbackQuery):
     user_id = call.from_user.id
     action, target = call.data.split("_")
     target_id = int(target)
+
     if action == "skip":
         await call.answer("Пропущено 👎")
     elif action == "like":
@@ -203,20 +213,27 @@ async def process_like(call: types.CallbackQuery):
         else:
             await call.answer("Суперлайк можно использовать раз в сутки ❗")
 
+    # Показываем следующую анкету
+    await call.message.delete()
+    await show_random_profile(call.message.chat.id, user_id)
+
 @dp.message_handler(Text(equals="💌 Мои мэтчи"))
 async def my_matches(msg: types.Message):
     cursor.execute("SELECT to_id FROM likes WHERE from_id=? AND type IN ('like','superlike')", (msg.from_user.id,))
-    liked = [x[0] for x in cursor.fetchall()]
+    liked = {x[0] for x in cursor.fetchall()}
     cursor.execute("SELECT from_id FROM likes WHERE to_id=? AND type IN ('like','superlike')", (msg.from_user.id,))
-    liked_back = [x[0] for x in cursor.fetchall()]
-    matches = set(liked) & set(liked_back)
+    liked_back = {x[0] for x in cursor.fetchall()}
+    matches = liked & liked_back
+
     if not matches:
         await msg.answer("Пока нет мэтчей 😔")
     else:
         for m in matches:
             user = get_user(m)
-            if user:
-                await msg.answer(f"🔥 У вас мэтч с {user[2]}, {user[3]}!")
+            if user and user[5]:
+                kb = InlineKeyboardMarkup()
+                kb.add(InlineKeyboardButton("💬 Написать", url=f"tg://user?id={user[0]}"))
+                await bot.send_photo(msg.chat.id, user[5], caption=f"{user[2]}, {user[3]}\n\n{user[4]}", reply_markup=kb)
 
 @dp.message_handler(Text(equals="👥 Посоветовать другу"))
 async def invite(msg: types.Message):
@@ -226,16 +243,18 @@ async def invite(msg: types.Message):
 async def admin_cmd(msg: types.Message):
     if msg.from_user.id != ADMIN_ID:
         return
-    text = msg.text.split(" ", 2)
-    if len(text) >= 3 and text[1] == "message":
-        message = text[2]
+    parts = msg.text.split(" ", 2)
+    if len(parts) >= 3 and parts[1] == "message":
+        message = parts[2]
         cursor.execute("SELECT user_id FROM users")
-        for row in cursor.fetchall():
+        sent = 0
+        for (user_id,) in cursor.fetchall():
             try:
-                await bot.send_message(row[0], f"📢 Сообщение от админа: {message}")
-            except:
-                pass
-        await msg.answer("Рассылка завершена ✅")
+                await bot.send_message(user_id, f"📢 Сообщение от админа: {message}")
+                sent += 1
+            except Exception as e:
+                logger.warning(f"Не удалось отправить {user_id}: {e}")
+        await msg.answer(f"✅ Рассылка завершена. Отправлено: {sent}")
     else:
         cursor.execute("SELECT COUNT(*) FROM users")
         users = cursor.fetchone()[0]
