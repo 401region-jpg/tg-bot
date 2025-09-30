@@ -1,295 +1,252 @@
-import asyncio
 import logging
-import aiosqlite
+import sqlite3
+import asyncio
+import random
+import shutil
+import datetime
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
-from aiogram.types import (
-    ReplyKeyboardMarkup, KeyboardButton,
-    InlineKeyboardMarkup, InlineKeyboardButton
-)
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils import executor
+from aiogram.dispatcher.filters import Text
 
-API_TOKEN = "7517420285:AAEJMY567Htns_i3SbMqww5U0O_-TTjbPW8"
-ADMIN_USERNAME = "lxsonen"  # только этот юзер может смотреть /admin
+# -----------------------------------
+# Настройки
+# -----------------------------------
+TOKEN = "7517420285:AAEJMY567Htns_i3SbMqww5U0O_-TTjbPW8"
+ADMIN_USERNAME = "@lxsonen"
+ADMIN_ID = None  # Определим позже по username
+DB_FILE = "database.db"
+BACKUP_FILE = "database_backup.db"
+MIN_AGE, MAX_AGE = 16, 30
+SUPERLIKE_COOLDOWN = 24 * 3600  # 1 раз в сутки
 
+# -----------------------------------
+# Логирование
+# -----------------------------------
 logging.basicConfig(level=logging.INFO)
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher()
+logger = logging.getLogger(__name__)
 
-# Главное меню
-main_kb = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="📄 Моя анкета")],
-        [KeyboardButton(text="🔍 Смотреть анкеты")],
-        [KeyboardButton(text="❤️ Мои мэтчи")]
-    ],
-    resize_keyboard=True
-)
+# -----------------------------------
+# База данных
+# -----------------------------------
+conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+cursor = conn.cursor()
 
-db = None
+cursor.execute("""CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    username TEXT,
+    name TEXT,
+    age INTEGER,
+    description TEXT,
+    photo TEXT,
+    last_active TIMESTAMP,
+    superlike_used TIMESTAMP,
+    ref_bonus INTEGER DEFAULT 0
+)""")
 
-async def init_db():
-    global db
-    db = await aiosqlite.connect("db.sqlite3")
-    await db.execute("""
-    CREATE TABLE IF NOT EXISTS users(
-        user_id INTEGER PRIMARY KEY,
-        username TEXT,
-        name TEXT,
-        age INTEGER,
-        bio TEXT,
-        photo_id TEXT,
-        step TEXT
-    )
-    """)
-    await db.execute("""
-    CREATE TABLE IF NOT EXISTS likes(
-        liker INTEGER,
-        liked INTEGER,
-        PRIMARY KEY(liker, liked)
-    )
-    """)
-    await db.execute("""
-    CREATE TABLE IF NOT EXISTS views(
-        viewer INTEGER,
-        viewed INTEGER,
-        PRIMARY KEY(viewer, viewed)
-    )
-    """)
-    await db.commit()
+cursor.execute("""CREATE TABLE IF NOT EXISTS likes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_id INTEGER,
+    to_id INTEGER,
+    type TEXT
+)""")
 
-# --- регистрация
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    async with db.execute("SELECT step FROM users WHERE user_id = ?", (message.from_user.id,)) as cur:
-        row = await cur.fetchone()
-    if row:
-        await message.answer("Вы уже зарегистрированы ✅", reply_markup=main_kb)
-        return
-    await db.execute(
-        "INSERT OR REPLACE INTO users(user_id, username, step) VALUES(?, ?, ?)",
-        (message.from_user.id, message.from_user.username, "name")
-    )
-    await db.commit()
-    await message.answer("Привет! Введи своё имя:")
+conn.commit()
 
-# --- админка
-@dp.message(Command("admin"))
-async def cmd_admin(message: types.Message):
-    if message.from_user.username != ADMIN_USERNAME:
-        await message.answer("У вас недостаточно прав ❌")
-        return
+# -----------------------------------
+# Бот и диспетчер
+# -----------------------------------
+bot = Bot(token=TOKEN)
+dp = Dispatcher(bot)
 
-    # количество пользователей
-    async with db.execute("SELECT COUNT(*) FROM users WHERE step='done'") as cur:
-        users_count = (await cur.fetchone())[0]
+# -----------------------------------
+# Клавиатуры
+# -----------------------------------
+main_kb = ReplyKeyboardMarkup(resize_keyboard=True)
+main_kb.add("👤 Заполнить анкету заново")
+main_kb.add("🔍 Смотреть анкеты", "💌 Мои мэтчи")
+main_kb.add("⭐ Мой суперлайк", "👥 Посоветовать другу")
 
-    # количество лайков
-    async with db.execute("SELECT COUNT(*) FROM likes") as cur:
-        likes_count = (await cur.fetchone())[0]
-
-    # количество мэтчей
-    async with db.execute("""
-        SELECT COUNT(*)
-        FROM likes l1
-        JOIN likes l2 ON l1.liker = l2.liked AND l1.liked = l2.liker
-        WHERE l1.liker < l2.liker
-    """) as cur:
-        matches_count = (await cur.fetchone())[0]
-
-    # сначала общая статистика
-    text = (
-        "📊 Статистика бота:\n\n"
-        f"👤 Пользователей: {users_count}\n"
-        f"❤️ Лайков: {likes_count}\n"
-        f"💞 Мэтчей: {matches_count}\n\n"
-        "📂 Анкеты:\n"
-    )
-    await message.answer(text)
-
-    # теперь вывод всех анкет по одной
-    async with db.execute("SELECT user_id, username, name, age, bio, photo_id FROM users WHERE step='done'") as cur:
-        rows = await cur.fetchall()
-
-    if not rows:
-        await message.answer("Анкет пока нет.")
-        return
-
-    for uid, username, name, age, bio, photo_id in rows:
-        caption = (
-            f"ID: {uid}\n"
-            f"Имя: {name}, {age}\n"
-            f"@{username if username else '—'}\n"
-            f"О себе: {bio}"
-        )
-        if photo_id:
-            await message.answer_photo(photo_id, caption=caption)
-        else:
-            await message.answer(caption)
-
-@dp.message()
-async def handler(message: types.Message):
-    async with db.execute("SELECT step FROM users WHERE user_id = ?", (message.from_user.id,)) as cur:
-        row = await cur.fetchone()
-    if not row:
-        await message.answer("Нажмите /start, чтобы зарегистрироваться.")
-        return
-    step = row[0]
-
-    # шаги регистрации
-    if step == "name":
-        await db.execute("UPDATE users SET name = ?, step = ? WHERE user_id = ?", (message.text, "age", message.from_user.id))
-        await db.commit()
-        await message.answer("Сколько вам лет?")
-        return
-
-    if step == "age":
-        if not message.text.isdigit():
-            await message.answer("Введите число.")
-            return
-        await db.execute("UPDATE users SET age = ?, step = ? WHERE user_id = ?", (int(message.text), "bio", message.from_user.id))
-        await db.commit()
-        await message.answer("Напишите пару слов о себе.")
-        return
-
-    if step == "bio":
-        await db.execute("UPDATE users SET bio = ?, step = ? WHERE user_id = ?", (message.text, "photo", message.from_user.id))
-        await db.commit()
-        await message.answer("Теперь отправьте своё фото.")
-        return
-
-    if step == "photo":
-        if not message.photo:
-            await message.answer("Пожалуйста, отправьте фото.")
-            return
-        photo_id = message.photo[-1].file_id
-        await db.execute("UPDATE users SET photo_id = ?, step = ? WHERE user_id = ?", (photo_id, "done", message.from_user.id))
-        await db.commit()
-        await message.answer("Анкета сохранена ✅", reply_markup=main_kb)
-        return
-
-    # --- меню
-    if message.text == "📄 Моя анкета":
-        async with db.execute("SELECT name, age, bio, photo_id FROM users WHERE user_id = ?", (message.from_user.id,)) as cur:
-            row = await cur.fetchone()
-        if not row:
-            await message.answer("Анкета не найдена. Нажмите /start")
-            return
-        name, age, bio, photo_id = row
-        if photo_id:
-            await message.answer_photo(photo_id, caption=f"Имя: {name}\nВозраст: {age}\nО себе: {bio}")
-        else:
-            await message.answer(f"Имя: {name}\nВозраст: {age}\nО себе: {bio}")
-        return
-
-    if message.text == "🔍 Смотреть анкеты":
-        await show_next_profile(message.from_user.id)
-        return
-
-    if message.text == "❤️ Мои мэтчи":
-        async with db.execute("""
-            SELECT u.user_id, u.name, u.age, u.bio, u.photo_id, u.username
-            FROM likes l1
-            JOIN likes l2 ON l1.liker = l2.liked AND l1.liked = l2.liker
-            JOIN users u ON u.user_id = l1.liked
-            WHERE l1.liker = ?
-        """, (message.from_user.id,)) as cur:
-            rows = await cur.fetchall()
-        if not rows:
-            await message.answer("У вас пока нет мэтчей.")
-            return
-        for uid, name, age, bio, photo_id, username in rows:
-            text = f"Имя: {name}\nВозраст: {age}\nО себе: {bio}\n"
-            if username:
-                text += f"@{username}"
-            if photo_id:
-                await message.answer_photo(photo_id, caption=text)
-            else:
-                await message.answer(text)
-        return
-
-# --- функция показа следующей анкеты
-async def show_next_profile(user_id: int):
-    async with db.execute("""
-        SELECT user_id, name, age, bio, photo_id
-        FROM users
-        WHERE step = 'done' AND user_id != ?
-        AND user_id NOT IN (SELECT viewed FROM views WHERE viewer = ?)
-        ORDER BY RANDOM() LIMIT 1
-    """, (user_id, user_id)) as cur:
-        row = await cur.fetchone()
-
-    if not row:
-        await db.execute("DELETE FROM views WHERE viewer = ?", (user_id,))
-        await db.commit()
-        await bot.send_message(user_id, "Анкеты закончились — начинаем заново! 🔄", reply_markup=main_kb)
-        return
-
-    uid, name, age, bio, photo_id = row
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❤️ Нравится", callback_data=f"like:{uid}")],
-        [InlineKeyboardButton(text="➡️ Пропустить", callback_data=f"skip:{uid}")],
-        [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu")]
-    ])
-    text = f"Имя: {name}\nВозраст: {age}\nО себе: {bio}"
-    if photo_id:
-        await bot.send_photo(user_id, photo_id, caption=text, reply_markup=kb)
-    else:
-        await bot.send_message(user_id, text, reply_markup=kb)
-
-# --- лайки и пропуск
-@dp.callback_query()
-async def callbacks(call: types.CallbackQuery):
-    data = call.data or ""
-    if data == "menu":
-        await call.message.answer("Вы вернулись в главное меню 🏠", reply_markup=main_kb)
-        return
-
-    if data.startswith("like:"):
-        liked_id = int(data.split(":", 1)[1])
-        await db.execute("INSERT OR IGNORE INTO likes(liker, liked) VALUES(?, ?)", (call.from_user.id, liked_id))
-        await db.execute("INSERT OR IGNORE INTO views(viewer, viewed) VALUES(?, ?)", (call.from_user.id, liked_id))
-        await db.commit()
-        async with db.execute("SELECT username FROM users WHERE user_id = ?", (call.from_user.id,)) as cur:
-            liker_username = (await cur.fetchone())[0]
-        async with db.execute("SELECT 1 FROM likes WHERE liker = ? AND liked = ?", (liked_id, call.from_user.id)) as cur:
-            rev = await cur.fetchone()
-        if rev:
-            await call.answer("Это мэтч! 🎉")
-            try:
-                if liker_username:
-                    await bot.send_message(liked_id, f"У вас мэтч с @{liker_username} ❤️")
-                else:
-                    await bot.send_message(liked_id, f"У вас мэтч с {call.from_user.first_name} ❤️")
-            except Exception:
-                pass
-        else:
-            await call.answer("Симпатия сохранена.")
-        await show_next_profile(call.from_user.id)
-
-    elif data.startswith("skip:"):
-        skipped_id = int(data.split(":", 1)[1])
-        await db.execute("INSERT OR IGNORE INTO views(viewer, viewed) VALUES(?, ?)", (call.from_user.id, skipped_id))
-        await db.commit()
-        await call.answer("Пропущено.")
-        await show_next_profile(call.from_user.id)
-
-# --- удаление анкеты при блокировке
-@dp.my_chat_member()
-async def handle_block(event: types.ChatMemberUpdated):
-    if event.new_chat_member.status in ["kicked", "left"]:
-        await db.execute("DELETE FROM users WHERE user_id = ?", (event.from_user.id,))
-        await db.execute("DELETE FROM likes WHERE liker = ? OR liked = ?", (event.from_user.id, event.from_user.id))
-        await db.execute("DELETE FROM views WHERE viewer = ? OR viewed = ?", (event.from_user.id, event.from_user.id))
-        await db.commit()
-
-# --- запуск
-async def main():
-    await init_db()
+# -----------------------------------
+# Вспомогательные функции
+# -----------------------------------
+def backup_db():
     try:
-        await dp.start_polling(bot)
-    finally:
-        await bot.session.close()
-        await db.close()
+        shutil.copy(DB_FILE, BACKUP_FILE)
+    except Exception as e:
+        logger.error(f"Ошибка резервного копирования: {e}")
 
+def get_user(user_id):
+    cursor.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
+    return cursor.fetchone()
+
+def update_activity(user_id):
+    cursor.execute("UPDATE users SET last_active=? WHERE user_id=?", (datetime.datetime.now(), user_id))
+    conn.commit()
+
+async def log_errors():
+    while True:
+        await asyncio.sleep(86400)  # раз в день
+        try:
+            await bot.send_message(ADMIN_ID, "ℹ️ Ежедневный отчёт: бот работает стабильно ✅")
+        except Exception as e:
+            logger.error(f"Ошибка отчета админу: {e}")
+
+def cleanup_inactive():
+    cutoff = datetime.datetime.now() - datetime.timedelta(days=30)
+    cursor.execute("DELETE FROM users WHERE last_active < ?", (cutoff,))
+    conn.commit()
+
+# -----------------------------------
+# Хендлеры
+# -----------------------------------
+@dp.message_handler(commands=["start"])
+async def start_cmd(msg: types.Message):
+    global ADMIN_ID
+    if msg.from_user.username == ADMIN_USERNAME.lstrip("@"):
+        ADMIN_ID = msg.from_user.id
+
+    cursor.execute("INSERT OR IGNORE INTO users (user_id, username, last_active) VALUES (?, ?, ?)",
+                   (msg.from_user.id, msg.from_user.username, datetime.datetime.now()))
+    conn.commit()
+    await msg.answer("👋 Добро пожаловать в бота знакомств! Заполни анкету:", reply_markup=main_kb)
+
+@dp.message_handler(Text(equals="👤 Заполнить анкету заново"))
+async def fill_profile(msg: types.Message):
+    await msg.answer("Введите имя:")
+    dp.register_message_handler(process_name, state="fill_name")
+
+async def process_name(msg: types.Message):
+    name = msg.text
+    cursor.execute("UPDATE users SET name=? WHERE user_id=?", (name, msg.from_user.id))
+    conn.commit()
+    await msg.answer("Введите возраст:")
+    dp.register_message_handler(process_age, state="fill_age")
+
+async def process_age(msg: types.Message):
+    try:
+        age = int(msg.text)
+    except:
+        await msg.answer("Введите число")
+        return
+    if age < MIN_AGE:
+        age = MIN_AGE
+    elif age > MAX_AGE:
+        age = MAX_AGE
+    cursor.execute("UPDATE users SET age=? WHERE user_id=?", (age, msg.from_user.id))
+    conn.commit()
+    await msg.answer("Введите описание (до 1240 символов):")
+    dp.register_message_handler(process_desc, state="fill_desc")
+
+async def process_desc(msg: types.Message):
+    text = msg.text[:1240]
+    cursor.execute("UPDATE users SET description=? WHERE user_id=?", (text, msg.from_user.id))
+    conn.commit()
+    await msg.answer("Отправьте фото:")
+    dp.register_message_handler(process_photo, content_types=["photo"], state="fill_photo")
+
+async def process_photo(msg: types.Message):
+    file_id = msg.photo[-1].file_id
+    cursor.execute("UPDATE users SET photo=? WHERE user_id=?", (file_id, msg.from_user.id))
+    conn.commit()
+    await msg.answer("✅ Анкета сохранена!", reply_markup=main_kb)
+
+@dp.message_handler(Text(equals="🔍 Смотреть анкеты"))
+async def view_profiles(msg: types.Message):
+    user = get_user(msg.from_user.id)
+    if not user or not user[2] or not user[3]:
+        await msg.answer("Сначала заполни анкету.")
+        return
+    cursor.execute("SELECT * FROM users WHERE user_id != ?", (msg.from_user.id,))
+    rows = cursor.fetchall()
+    if not rows:
+        await msg.answer("Нет анкет.")
+        return
+    row = random.choice(rows)
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("👍 Лайк", callback_data=f"like_{row[0]}"))
+    kb.add(InlineKeyboardButton("👎 Пропустить", callback_data=f"skip_{row[0]}"))
+    kb.add(InlineKeyboardButton("⭐ Суперлайк", callback_data=f"superlike_{row[0]}"))
+    await bot.send_photo(msg.chat.id, row[5], caption=f"{row[2]}, {row[3]}\n\n{row[4]}", reply_markup=kb)
+
+@dp.callback_query_handler(lambda c: c.data.startswith("like_") or c.data.startswith("superlike_") or c.data.startswith("skip_"))
+async def process_like(call: types.CallbackQuery):
+    user_id = call.from_user.id
+    action, target = call.data.split("_")
+    target_id = int(target)
+    if action == "skip":
+        await call.answer("Пропущено 👎")
+    elif action == "like":
+        cursor.execute("INSERT INTO likes (from_id, to_id, type) VALUES (?, ?, ?)", (user_id, target_id, "like"))
+        conn.commit()
+        await call.answer("Лайк 👍")
+    elif action == "superlike":
+        now = datetime.datetime.now()
+        cursor.execute("SELECT superlike_used, ref_bonus FROM users WHERE user_id=?", (user_id,))
+        row = cursor.fetchone()
+        last_used, bonus = row
+        if bonus > 0:
+            cursor.execute("UPDATE users SET ref_bonus=ref_bonus-1 WHERE user_id=?", (user_id,))
+            conn.commit()
+            allowed = True
+        elif not last_used or (now - datetime.datetime.fromisoformat(last_used)).total_seconds() > SUPERLIKE_COOLDOWN:
+            cursor.execute("UPDATE users SET superlike_used=? WHERE user_id=?", (now, user_id))
+            conn.commit()
+            allowed = True
+        else:
+            allowed = False
+        if allowed:
+            cursor.execute("INSERT INTO likes (from_id, to_id, type) VALUES (?, ?, ?)", (user_id, target_id, "superlike"))
+            conn.commit()
+            await bot.send_message(target_id, f"🌟 Вас выбрали! {call.from_user.first_name} использовал суперлайк!")
+            await call.answer("Суперлайк 🌟")
+        else:
+            await call.answer("Суперлайк можно использовать раз в сутки ❗")
+
+@dp.message_handler(Text(equals="💌 Мои мэтчи"))
+async def my_matches(msg: types.Message):
+    cursor.execute("SELECT to_id FROM likes WHERE from_id=? AND type IN ('like','superlike')", (msg.from_user.id,))
+    liked = [x[0] for x in cursor.fetchall()]
+    cursor.execute("SELECT from_id FROM likes WHERE to_id=? AND type IN ('like','superlike')", (msg.from_user.id,))
+    liked_back = [x[0] for x in cursor.fetchall()]
+    matches = set(liked) & set(liked_back)
+    if not matches:
+        await msg.answer("Пока нет мэтчей 😔")
+    else:
+        for m in matches:
+            user = get_user(m)
+            if user:
+                await msg.answer(f"🔥 У вас мэтч с {user[2]}, {user[3]}!")
+
+@dp.message_handler(Text(equals="👥 Посоветовать другу"))
+async def invite(msg: types.Message):
+    await msg.answer("Пригласи друга: https://t.me/rsuhinlove_bot")
+
+@dp.message_handler(commands=["admin"])
+async def admin_cmd(msg: types.Message):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    text = msg.text.split(" ", 2)
+    if len(text) >= 3 and text[1] == "message":
+        message = text[2]
+        cursor.execute("SELECT user_id FROM users")
+        for row in cursor.fetchall():
+            try:
+                await bot.send_message(row[0], f"📢 Сообщение от админа: {message}")
+            except:
+                pass
+        await msg.answer("Рассылка завершена ✅")
+    else:
+        cursor.execute("SELECT COUNT(*) FROM users")
+        users = cursor.fetchone()[0]
+        await msg.answer(f"👥 Пользователей: {users}")
+
+# -----------------------------------
+# Запуск
+# -----------------------------------
 if __name__ == "__main__":
-    asyncio.run(main())
+    loop = asyncio.get_event_loop()
+    loop.create_task(log_errors())
+    cleanup_inactive()
+    backup_db()
+    executor.start_polling(dp, skip_updates=True)
