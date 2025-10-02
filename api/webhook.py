@@ -1,27 +1,46 @@
 # api/webhook.py
 import asyncio
 from aiohttp import web
-from bot_core.bot import bot, dp
-from bot_core.db import Database
-from bot_core.handlers import *  # импортируем хендлеры
+from aiogram import Bot, Dispatcher
+from aiogram.fsm.storage.memory import MemoryStorage
+from config import TELEGRAM_TOKEN, DATABASE_URL
+from db import Database
 
-# Инициализация БД
-db = Database()
-loop = asyncio.new_event_loop()
-asyncio.set_event_loop(loop)
-loop.run_until_complete(db.init())
+# Глобальные переменные (инициализируются один раз при старте функции)
+bot = None
+dp = None
+db = None
 
-# Передаём db в хендлеры (можно через глобальную переменную или dependency injection)
-import bot_core.handlers
-bot_core.handlers.db = db
+async def init_bot():
+    """Инициализирует бота и БД"""
+    global bot, dp, db
+    if not bot:
+        bot = Bot(token=TELEGRAM_TOKEN)
+        dp = Dispatcher(storage=MemoryStorage())
+        db = Database()
+        await db.init()
 
 async def handler(request):
-    if request.method == "POST":
-        update = await request.json()
-        await dp.feed_webhook_update(bot, update)
-        return web.json_response({"ok": True})
-    return web.json_response({"error": "Method not allowed"}, status=405)
+    """Обрабатывает POST-запросы от Telegram"""
+    if request.method != "POST":
+        return web.Response(status=405)
 
-# ASGI-приложение для Vercel
-app = web.Application()
-app.router.add_post("/api/webhook", handler)
+    try:
+        update = await request.json()
+    except Exception:
+        return web.Response(status=400)
+
+    # Инициализируем бота, если ещё не сделано
+    await init_bot()
+
+    # Регистрируем хендлеры (можно сделать один раз при инициализации)
+    from handlers import register_handlers
+    register_handlers(dp, db, bot)
+
+    # Обрабатываем обновление
+    await dp.feed_webhook_update(bot, update)
+
+    return web.json_response({"ok": True})
+
+# Для Vercel: экспортируем функцию handler как app
+app = handler
