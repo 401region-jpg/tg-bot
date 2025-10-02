@@ -17,10 +17,9 @@ logger = logging.getLogger(__name__)
 _rate = {}
 
 def rate_limited(user_id: int) -> bool:
-    now = datetime.datetime.utcnow().timestamp()
+    now = datetime.datetime.now(datetime.UTC).timestamp()
     window = LAST_ACTIVE_UPDATE_MIN * 60 if LAST_ACTIVE_UPDATE_MIN else 300
     rec = _rate.get(user_id, [])
-    # keep entries in window
     rec = [t for t in rec if now - t < window]
     if len(rec) >= 6:
         _rate[user_id] = rec
@@ -33,7 +32,6 @@ def rate_limited(user_id: int) -> bool:
 profiles_cache = TTLCache(maxsize=1000, ttl=300)
 
 def main_menu_kb():
-    # ✅ Исправлено: правильный синтаксис для aiogram 3.x
     kb = [
         [KeyboardButton(text="📄 Моя анкета")],
         [KeyboardButton(text="🔍 Смотреть анкеты"), KeyboardButton(text="❤️ Мои мэтчи")],
@@ -43,7 +41,6 @@ def main_menu_kb():
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
 def profile_action_kb(target_id: int, super_available: bool = True):
-    # ✅ Исправлено: правильный синтаксис для aiogram 3.x
     buttons = [
         [InlineKeyboardButton(text="❤️ Нравится", callback_data=f"like:{target_id}")],
         [InlineKeyboardButton(text="➡️ Пропустить", callback_data=f"skip:{target_id}")],
@@ -53,11 +50,11 @@ def profile_action_kb(target_id: int, super_available: bool = True):
         buttons.insert(1, [InlineKeyboardButton(text="🌟 Суперлайк", callback_data=f"superlike:{target_id}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# Глобальный экземпляр бота (будет установлен в register_handlers)
+# Глобальный экземпляр бота
 bot_instance: Bot = None
+db = None  # будет установлен в register_handlers
 
 async def show_next_profile(viewer_id: int):
-    # try cache first
     cache_key = f"profiles_for_{viewer_id}"
     if cache_key in profiles_cache:
         row = profiles_cache[cache_key].pop() if profiles_cache[cache_key] else None
@@ -65,26 +62,23 @@ async def show_next_profile(viewer_id: int):
         row = await db.get_next_profile(viewer_id)
     if not row:
         await db.clear_views(viewer_id)
-        # refresh and try one more time
         row = await db.get_next_profile(viewer_id)
         if not row:
             await bot_instance.send_message(viewer_id, "Анкет нет.", reply_markup=main_menu_kb())
             return
 
-    # determine super availability
     user = await db.user_get(viewer_id)
     super_available = False
     if user:
         extra = user.get("superlike_extra") or 0
         extra_expires = user.get("superlike_extra_expires")
-        if extra and extra_expires and extra_expires > datetime.datetime.utcnow():
+        if extra and extra_expires and extra_expires > datetime.datetime.now(datetime.UTC):
             super_available = True
         else:
             last = user.get("last_superlike")
-            if not last or (datetime.datetime.utcnow() - last).total_seconds() > SUPERLIKE_COOLDOWN:
+            if not last or (datetime.datetime.now(datetime.UTC) - last).total_seconds() > SUPERLIKE_COOLDOWN:
                 super_available = True
 
-    # send profile
     caption = f"{row.get('name') or '—'}, {row.get('age') or '—'}\n\n{(row.get('bio') or '')[:DESC_LIMIT]}"
     kb = profile_action_kb(row.get("user_id"), super_available)
     try:
@@ -100,10 +94,8 @@ async def register_handlers(dp, database, bot: Bot):
     db = database
     bot_instance = bot
 
-    # start
     @dp.message(Command("start"))
     async def cmd_start(msg: types.Message, state: FSMContext):
-        # ✅ Исправлено: get_args заменён на split
         parts = msg.text.split()
         args = " ".join(parts[1:]) if len(parts) > 1 else ""
         ref = None
@@ -113,16 +105,14 @@ async def register_handlers(dp, database, bot: Bot):
             except:
                 ref = None
         await db.user_create_if_missing(msg.from_user.id, msg.from_user.username, ref)
-        # grant referral bonus
         if ref:
             ref_user = await db.user_get(ref)
             if ref_user:
                 await db.user_update(ref, 
                     superlike_extra=(ref_user.get("superlike_extra", 0) + 1),
-                    superlike_extra_expires=(datetime.datetime.utcnow() + datetime.timedelta(days=REFERRAL_BONUS_DAYS))
+                    superlike_extra_expires=(datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=REFERRAL_BONUS_DAYS))
                 )
-        await db.user_update(msg.from_user.id, last_active=datetime.datetime.utcnow())
-        # if admin and not set, set is_admin
+        await db.user_update(msg.from_user.id, last_active=datetime.datetime.now(datetime.UTC))
         if msg.from_user.username and msg.from_user.username.lower() == ADMIN_USERNAME.lower():
             await db.user_update(msg.from_user.id, is_admin=True)
         u = await db.user_get(msg.from_user.id)
@@ -132,7 +122,6 @@ async def register_handlers(dp, database, bot: Bot):
         await state.set_state(ProfileStates.name)
         await msg.answer("Введите имя (3-50 символов):", reply_markup=main_menu_kb())
 
-    # registration FSM
     @dp.message(ProfileStates.name)
     async def reg_name(msg: types.Message, state: FSMContext):
         text = (msg.text or "").strip()
@@ -150,10 +139,8 @@ async def register_handlers(dp, database, bot: Bot):
         except:
             await msg.answer("Введите число.")
             return
-        if age < MIN_AGE:
-            age = MIN_AGE
-        if age > MAX_AGE:
-            age = MAX_AGE
+        if age < MIN_AGE: age = MIN_AGE
+        if age > MAX_AGE: age = MAX_AGE
         await state.update_data(age=age)
         await state.set_state(ProfileStates.bio)
         await msg.answer(f"Введите описание (до {DESC_LIMIT} символов):")
@@ -169,7 +156,6 @@ async def register_handlers(dp, database, bot: Bot):
     async def reg_photo(msg: types.Message, state: FSMContext):
         data = await state.get_data()
         photo_id = msg.photo[-1].file_id
-        # write to db
         await db.user_update(msg.from_user.id,
                              username=msg.from_user.username,
                              name=data["name"],
@@ -177,11 +163,10 @@ async def register_handlers(dp, database, bot: Bot):
                              bio=data["bio"],
                              photo_id=photo_id,
                              step="done",
-                             last_active=datetime.datetime.utcnow())
+                             last_active=datetime.datetime.now(datetime.UTC))
         await state.clear()
         await msg.answer("Анкета сохранена ✅", reply_markup=main_menu_kb())
 
-    # show profile / browsing
     @dp.message(F.text == "🔍 Смотреть анкеты")
     async def browse(msg: types.Message):
         if rate_limited(msg.from_user.id):
@@ -193,7 +178,6 @@ async def register_handlers(dp, database, bot: Bot):
             return
         await show_next_profile(msg.from_user.id)
 
-    # callbacks: like/superlike/skip
     @dp.callback_query(lambda c: c.data and c.data.startswith(("like:", "superlike:", "skip:")))
     async def handle_reaction(cq: types.CallbackQuery):
         user_id = cq.from_user.id
@@ -217,7 +201,6 @@ async def register_handlers(dp, database, bot: Bot):
             mutual = await db.exists_mutual(user_id, target)
             if mutual:
                 match_id = await db.create_match(user_id, target)
-                # notify other: send non-invasive notice with button to view
                 try:
                     await bot_instance.send_message(target, "💌 Вам поставили симпатию! Нажмите, чтобы посмотреть.", 
                         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -233,32 +216,29 @@ async def register_handlers(dp, database, bot: Bot):
             return
 
         if action == "superlike":
-            # check availability
             u = await db.user_get(user_id)
             allowed = False
             if u:
                 extra = u.get("superlike_extra") or 0
                 extra_expires = u.get("superlike_extra_expires")
-                if extra and extra_expires and extra_expires > datetime.datetime.utcnow():
+                if extra and extra_expires and extra_expires > datetime.datetime.now(datetime.UTC):
                     allowed = True
                     await db.user_update(user_id, superlike_extra=extra - 1)
                 else:
                     last = u.get("last_superlike")
-                    if not last or (datetime.datetime.utcnow() - last).total_seconds() > SUPERLIKE_COOLDOWN:
+                    if not last or (datetime.datetime.now(datetime.UTC) - last).total_seconds() > SUPERLIKE_COOLDOWN:
                         allowed = True
-                        await db.user_update(user_id, last_superlike=datetime.datetime.utcnow())
+                        await db.user_update(user_id, last_superlike=datetime.datetime.now(datetime.UTC))
 
             if not allowed:
                 await cq.answer("Суперлайк доступен 1 раз в 24 часа или по реф. бонусу.")
                 return
 
-            # record superlike
             await db.insert_like(user_id, target, "superlike")
             await db.add_view(user_id, target)
             mutual = await db.exists_mutual(user_id, target)
             if mutual:
                 match_id = await db.create_match(user_id, target)
-                # notify target that someone superliked them (with username)
                 try:
                     name = (await db.user_get(user_id)).get("username") or cq.from_user.first_name
                     await bot_instance.send_message(target, f"🌟 Вас выбрали! @{name} использовал(а) Суперлайк!", 
@@ -282,7 +262,6 @@ async def register_handlers(dp, database, bot: Bot):
             await show_next_profile(user_id)
             return
 
-    # view match button handler
     @dp.callback_query(lambda c: c.data and c.data.startswith("viewmatch:"))
     async def view_match(cq: types.CallbackQuery):
         mid = int(cq.data.split(":", 1)[1])
@@ -311,7 +290,6 @@ async def register_handlers(dp, database, bot: Bot):
         await db.mark_match_shown(mid, cq.from_user.id)
         await cq.answer()
 
-    # my matches command by button
     @dp.message(F.text == "❤️ Мои мэтчи")
     async def my_matches(msg: types.Message):
         rows = await db.get_unshown_matches(msg.from_user.id)
@@ -330,10 +308,8 @@ async def register_handlers(dp, database, bot: Bot):
                 await msg.answer(caption)
             await db.mark_match_shown(r["id"], msg.from_user.id)
 
-    # admin command: stats + broadcast
     @dp.message(Command("admin"))
     async def admin_cmd(msg: types.Message):
-        # check if allowed
         allowed = False
         if msg.from_user.id == ADMIN_ID:
             allowed = True
@@ -357,22 +333,18 @@ async def register_handlers(dp, database, bot: Bot):
                     pass
             await msg.answer(f"Отправлено: {sent}")
             return
-        # show stats: total, active last hour, matches today, new today
         users = await db.all_users()
         total = len(users)
-        hour_ago = datetime.datetime.utcnow() - datetime.timedelta(hours=1)
-        active = sum(1 for u in users if u.get("last_active") and datetime.datetime.fromisoformat(u["last_active"]) > hour_ago)
-        # Для matches_today и new_today нужно будет добавить поля created_at в SQLite
-        await msg.answer(f"Всего: {total}\nАктивных (1ч): {active}\n(Подробная статистика требует доработки БД)")
+        hour_ago = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=1)
+        active = sum(1 for u in users if u.get("last_active") and u["last_active"] > hour_ago)
+        await msg.answer(f"Всего: {total}\nАктивных (1ч): {active}")
 
-    # invite/referral
     @dp.message(F.text == "👥 Посоветовать другу")
     async def invite(msg: types.Message):
         me = await bot_instance.get_me()
         link = f"https://t.me/{me.username}?start=ref_{msg.from_user.id}"
         await msg.answer(f"Поделитесь ссылкой: {link}\nЗа регистрацию по ссылке реферер получает +1 Суперлайк на {REFERRAL_BONUS_DAYS} дня.")
 
-    # my profile view and edit buttons
     @dp.message(F.text == "📄 Моя анкета")
     async def my_profile(msg: types.Message):
         u = await db.user_get(msg.from_user.id)
@@ -398,7 +370,6 @@ async def register_handlers(dp, database, bot: Bot):
         else:
             await msg.answer(caption, reply_markup=kb)
 
-    # edit callbacks
     @dp.callback_query(lambda c: c.data in ("edit_name", "edit_age", "edit_bio", "edit_photo", "re_full"))
     async def handle_edit(cq: types.CallbackQuery, state: FSMContext):
         if cq.data == "edit_name":
@@ -418,7 +389,6 @@ async def register_handlers(dp, database, bot: Bot):
             await cq.message.answer("Начинаем заново. Введите имя:")
         await cq.answer()
 
-    # handlers for edit states
     @dp.message(EditStates.edit_name)
     async def do_edit_name(msg: types.Message, state: FSMContext):
         text = (msg.text or "").strip()
@@ -436,10 +406,8 @@ async def register_handlers(dp, database, bot: Bot):
         except:
             await msg.answer("Введите число")
             return
-        if age < MIN_AGE:
-            age = MIN_AGE
-        if age > MAX_AGE:
-            age = MAX_AGE
+        if age < MIN_AGE: age = MIN_AGE
+        if age > MAX_AGE: age = MAX_AGE
         await db.user_update(msg.from_user.id, age=age)
         await state.clear()
         await msg.answer("Возраст обновлён.", reply_markup=main_menu_kb())
