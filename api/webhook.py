@@ -21,12 +21,19 @@ async def _init_bot():
         register_handlers(_dp, _db, _bot)
 
 def handler(request, context):
+    """
+    Vercel-совместимая serverless-функция.
+    Обязательно называется `handler` и принимает (request, context).
+    """
     if request.method != "POST":
-        return {"statusCode": 405}
+        return {"statusCode": 405, "body": "Method Not Allowed"}
+
     try:
         update = json.loads(request.body)
-    except:
-        return {"statusCode": 400}
+    except Exception:
+        return {"statusCode": 400, "body": "Invalid JSON"}
+
     asyncio.run(_init_bot())
     asyncio.run(_dp.feed_webhook_update(_bot, update))
+
     return {"statusCode": 200, "body": '{"ok":true}'}
