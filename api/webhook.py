@@ -1,19 +1,15 @@
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, types
-import asyncio
 import os
 
-# Настройки
 TOKEN = os.getenv("BOT_TOKEN")
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# Регистрируем обработчик команды /start
 @dp.message_handler(commands=["start"])
 async def start_handler(message: types.Message):
     await message.answer("Бот на Vercel работает через Webhook!")
 
-# FastAPI приложение
 app = FastAPI()
 
 @app.post("/api/webhook")
