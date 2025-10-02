@@ -6,7 +6,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from config import TELEGRAM_TOKEN, DATABASE_URL
 from db import Database
 
-# Глобальные переменные (инициализируются один раз при старте функции)
+# Глобальные переменные (инициализируются один раз)
 bot = None
 dp = None
 db = None
@@ -30,10 +30,10 @@ async def handler(request):
     except Exception:
         return web.Response(status=400)
 
-    # Инициализируем бота, если ещё не сделано
+    # Инициализируем бота при первом вызове
     await init_bot()
 
-    # Регистрируем хендлеры (можно сделать один раз при инициализации)
+    # Регистрируем хендлеры
     from handlers import register_handlers
     register_handlers(dp, db, bot)
 
