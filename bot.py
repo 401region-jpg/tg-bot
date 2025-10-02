@@ -1,69 +1,66 @@
 # bot.py
+import os
 import asyncio
 import logging
-import datetime
 from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
+from config import TELEGRAM_TOKEN, WEBHOOK_URL, DATABASE_URL
 
-from config import TELEGRAM_TOKEN, PORT, ADMIN_ID
-from db import Database  # ← Убедись, что импортируешь Database
+# Импорты
+from db import Database
 from handlers import register_handlers
 
+# Логирование
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Проверка переменных
 if not TELEGRAM_TOKEN:
-    raise ValueError("❌ TELEGRAM_TOKEN не задан в .env")
-if not ADMIN_ID:
-    logger.warning("⚠️ ADMIN_ID не задан — админ-команды работать не будут")
-logger.info("✅ Все переменные окружения загружены")
+    raise ValueError("❌ TELEGRAM_TOKEN не задан")
+if not DATABASE_URL:
+    raise ValueError("❌ DATABASE_URL не задан")
+if not WEBHOOK_URL:
+    raise ValueError("❌ WEBHOOK_URL не задан")
 
+logger.info("✅ Конфигурация загружена")
+
+# Инициализация
 storage = MemoryStorage()
 bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher(storage=storage)
-db = Database()  # Использует SQLite по умолчанию (файл bot.db)
+db = Database()
 
-async def start_webserver():
-    async def handler(request):
-        return web.Response(text="OK")
-    app = web.Application()
-    app.router.add_get("/", handler)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    logger.info(f"Keepalive server started on port {PORT}")
-
-async def periodic_tasks():
-    # бэкап, очистка, метрики
-    while True:
-        try:
-            await db.backup_snapshot()
-            logger.info("✅ Бэкап выполнен")
-        except Exception:
-            logger.exception("❌ Ошибка бэкапа")
-
-        try:
-            cutoff = datetime.datetime.utcnow() - datetime.timedelta(days=30)
-            # Используем метод из db.py для очистки
-            await db.cleanup_old_users(cutoff)
-            logger.info("🧹 Старые пользователи удалены")
-        except Exception:
-            logger.exception("❌ Ошибка очистки")
-
-        await asyncio.sleep(60 * 60)  # раз в час
-
-async def main():
+async def on_startup(app):
+    """Выполняется при запуске сервера"""
     await db.init()
-    await register_handlers(dp, db, bot)  # ← добавлен bot
-    asyncio.create_task(start_webserver())
-    asyncio.create_task(periodic_tasks())
-    await dp.start_polling(bot)
+    await register_handlers(dp, db, bot)
+    # Устанавливаем вебхук
+    await bot.set_webhook(url=WEBHOOK_URL)
+    logger.info(f"✅ Вебхук установлен: {WEBHOOK_URL}")
 
+async def on_shutdown(app):
+    """Выполняется при остановке"""
+    await bot.delete_webhook(drop_pending_updates=True)
+    await dp.storage.close()
+    await dp.storage.wait_closed()
+    logger.info("🔌 Вебхук удалён")
+
+async def handle_webhook(request):
+    """Обрабатывает POST-запросы от Telegram"""
+    if request.content_type == 'application/json':
+        update = await request.json()
+        await dp.feed_webhook_update(bot, update)
+        return web.Response()
+    return web.Response(status=403)
+
+# Создаём aiohttp-приложение
+app = web.Application()
+app.router.add_post('/api/webhook', handle_webhook)  # Путь должен совпадать с WEBHOOK_URL
+app.on_startup.append(on_startup)
+app.on_shutdown.append(on_shutdown)
+
+# Для локального запуска (не используется на Vercel)
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    port = int(os.getenv("PORT", 8080))
+    web.run_app(app, host="0.0.0.0", port=port)
