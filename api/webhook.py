@@ -1,46 +1,45 @@
 # api/webhook.py
 import asyncio
-from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from config import TELEGRAM_TOKEN, DATABASE_URL
 from db import Database
 
 # Глобальные переменные (инициализируются один раз)
-bot = None
-dp = None
-db = None
+_bot = None
+_dp = None
+_db = None
 
-async def init_bot():
-    """Инициализирует бота и БД"""
-    global bot, dp, db
-    if not bot:
-        bot = Bot(token=TELEGRAM_TOKEN)
-        dp = Dispatcher(storage=MemoryStorage())
-        db = Database()
-        await db.init()
+async def get_bot():
+    global _bot, _dp, _db
+    if _bot is None:
+        _bot = Bot(token=TELEGRAM_TOKEN)
+        _dp = Dispatcher(storage=MemoryStorage())
+        _db = Database()
+        await _db.init()
+        from handlers import register_handlers
+        register_handlers(_dp, _db, _bot)
+    return _bot, _dp
 
-async def handler(request):
-    """Обрабатывает POST-запросы от Telegram"""
+def handler(request):
+    """Vercel-совместимая функция"""
+    import json
+    
     if request.method != "POST":
-        return web.Response(status=405)
+        return {"statusCode": 405, "body": "Method Not Allowed"}
 
     try:
-        update = await request.json()
+        update = json.loads(request.body)
     except Exception:
-        return web.Response(status=400)
+        return {"statusCode": 400, "body": "Invalid JSON"}
 
-    # Инициализируем бота при первом вызове
-    await init_bot()
+    # Запускаем асинхронную обработку
+    async def process():
+        bot, dp = await get_bot()
+        await dp.feed_webhook_update(bot, update)
 
-    # Регистрируем хендлеры
-    from handlers import register_handlers
-    register_handlers(dp, db, bot)
+    asyncio.run(process())
+    return {"statusCode": 200, "body": '{"ok":true}'}
 
-    # Обрабатываем обновление
-    await dp.feed_webhook_update(bot, update)
-
-    return web.json_response({"ok": True})
-
-# Для Vercel: экспортируем функцию handler как app
+# Экспортируем функцию для Vercel
 app = handler
