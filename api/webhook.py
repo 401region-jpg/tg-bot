@@ -1,39 +1,24 @@
-# api/webhook.py
-import json
+from fastapi import FastAPI, Request
+from aiogram import Bot, Dispatcher, types
 import asyncio
-from aiogram import Bot, Dispatcher
-from aiogram.fsm.storage.memory import MemoryStorage
-from config import TELEGRAM_TOKEN
-from db import Database
+import os
 
-_bot = None
-_dp = None
-_db = None
+# Настройки
+TOKEN = os.getenv("BOT_TOKEN")
+bot = Bot(token=TOKEN)
+dp = Dispatcher()
 
-async def _init_bot():
-    global _bot, _dp, _db
-    if _bot is None:
-        _bot = Bot(token=TELEGRAM_TOKEN)
-        _dp = Dispatcher(storage=MemoryStorage())
-        _db = Database()
-        await _db.init()
-        from handlers import register_handlers
-        register_handlers(_dp, _db, _bot)
+# Регистрируем обработчик команды /start
+@dp.message_handler(commands=["start"])
+async def start_handler(message: types.Message):
+    await message.answer("Бот на Vercel работает через Webhook!")
 
-def handler(request, context):
-    """
-    Vercel-совместимая serverless-функция.
-    Обязательно называется `handler` и принимает (request, context).
-    """
-    if request.method != "POST":
-        return {"statusCode": 405, "body": "Method Not Allowed"}
+# FastAPI приложение
+app = FastAPI()
 
-    try:
-        update = json.loads(request.body)
-    except Exception:
-        return {"statusCode": 400, "body": "Invalid JSON"}
-
-    asyncio.run(_init_bot())
-    asyncio.run(_dp.feed_webhook_update(_bot, update))
-
-    return {"statusCode": 200, "body": '{"ok":true}'}
+@app.post("/api/webhook")
+async def telegram_webhook(request: Request):
+    data = await request.json()
+    update = types.Update(**data)
+    await dp.process_update(update)
+    return {"ok": True}
