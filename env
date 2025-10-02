@@ -1,2 +1,3 @@
 TELEGRAM_BOT_TOKEN=7517420285:AAEJMY567Htns_i3SbMqww5U0O_-TTjbPW8
 ADMIN_ID=642341991
+DATABASE_URL=postgresql://postgres.lngpgghopsexohwywcjb:[11082005Vv%21]@aws-1-us-east-2.pooler.supabase.com:5432/postgres
